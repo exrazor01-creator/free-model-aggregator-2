@@ -104,9 +104,18 @@ let manifestIndex = 0;
 /** Models a refusal proved unusable for this trial (429 twice, a spent budget, a repeated 5xx). */
 const deadModels = new Set<string>();
 /**
- * Models that answered one 429: a rate limit does not clear inside one prompt, so the next
- * candidate gets this prompt at once — but the model is retried as first candidate on the next
- * prompt, in case the limit was a short burst. A second 429 moves it to deadModels.
+ * The -02 failover policy, in one place. A refusal is real here — a provider's 429 or 5xx reaches
+ * this server as the provider sent it — so the policy is per refusal kind:
+ *   - 429: one 429 cools the model for this prompt only (a rate limit does not clear inside one
+ *     prompt), so the next candidate gets this prompt at once — but the model is retried as first
+ *     candidate on the next prompt, in case the limit was a short burst. A second 429 proves it is
+ *     not, so the model is dead for the trial.
+ *   - 5xx or a transport failure: one retry on the same model, then it is dead for the trial.
+ *   - 401: the entrant's key is missing or refused, so no model can serve anything; dialling stops.
+ *   - any other 4xx: this model's own refusal, so the next candidate gets the prompt at once.
+ * Every refusal is recorded, and when a retried or failed-over prompt is still served, its refusals
+ * ride on the response in the `x-makefun-upstream-failures` header — the only way the failover
+ * column can see a recovered refusal, since the env never sees the gateway's traffic.
  */
 const coolingModels = new Set<string>();
 /** A 401 means the entrant's key is missing or refused: no model can serve anything after it. */
@@ -203,7 +212,10 @@ interface FailureRow {
 /** The failover trail as the header carries it: at most eight rows, ASCII only. */
 function trailHeader(failures: readonly FailureRow[]): string | null {
   if (failures.length === 0) return null;
-  return JSON.stringify(failures.slice(0, MAX_TRAIL_ROWS));
+  // Header values must be ASCII: a gateway error code carrying a non-ASCII byte would make
+  // writeHead throw, so anything outside printable ASCII becomes '?'. Model ids and the usual
+  // codes are ASCII already, so on the scored path this changes nothing.
+  return JSON.stringify(failures.slice(0, MAX_TRAIL_ROWS)).replace(/[^\x20-\x7e]/g, '?');
 }
 
 /** The code of a gateway refusal's error body: its code, else its type, else a code for its status. */
